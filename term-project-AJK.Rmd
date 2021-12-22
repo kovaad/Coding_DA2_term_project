@@ -1,0 +1,556 @@
+---
+title: "Do football players get more or less valuable as they get older?"
+author: "Adam Jozsef Kovacs"
+date: 2021-12-22
+output: 
+  pdf_document:
+    extra_dependencies: ["float"]
+geometry: margin=1.8cm
+fontsize: 9pt
+header-includes: |
+   \usepackage{titling}
+   \setlength{\droptitle}{-8em}
+   \usepackage{floatrow}
+   \floatsetup[figure]{capposition=top}
+   \usepackage{titling}
+   \setlength{\droptitle}{-5em}
+---
+
+## Introduction
+
+Nowadays it is more and more common in the world of football to apply rigorous data analysis for both performance analysis and recruitment advisory. The aim of this project, related to the second goal, is to uncover the relationship between the age of football players (x variable) and their estimated market values (y variable). The relevance of this question is twofold: advances in medicine and coaching techniques on the one hand, earlier maturing youngsters on the other hand changed the length and shape of footballers careers urging scouts and analysts to reconsider their practices. To understand the pattern of association between age and market value, several linear regression models are estimated including multivariate ones that consider a variety of potential confoundres (e.g. position, nationality, goals, assists etc. as z variables). 
+
+```{r load packages, message = FALSE, warning = FALSE, echo = FALSE, eval = TRUE, comment=FALSE}
+#clean environment
+rm(list =ls())
+
+#install required packages
+if (!require("pacman")) {
+  install.packages("pacman")
+}
+pacman::p_load(AER,tidyverse,lspline, fixest, modelsummary, ggpubr, reshape2, kableExtra, dplyr, ggcorrplot)
+
+devtools::install_github("JaseZiv/worldfootballR")
+library(worldfootballR)
+
+```
+## Data
+
+The dataset analyzed contains footballers in the European big 5 championships and was constructed from two sources. For the two main variables, market value and age as well as basic information on players (e.g. nationality, team, preferred foot), [**transfermarkt.com**](https://www.transfermarkt.com) is the source of data. As for statistics on the performance of players (e.g. goals, assists etc.), [**fbref.com**](https://fbref.com/en/) is the source of data. More information on how the dataset was built is available in the Data section of the Appendix. 
+
+In a bit more detail about the variables: market value and player information downloaded from transfermarkt contain data of players before the beginning of the 2021/22 season. As a consequence, football statistics for the preceding season are considered from fbref (they contain up-to-date information potentially driving the valuation of the players). When merging the datasets from the two sources, inner joins were used for most variables (lost observations did not play a single game in the 2020-21 season). The only exceptions were goalkeeper statistics where left join was applied and NA values of outfield players were replaced by zeros (goalkeepers also have 0 for e.g. goals). An issue in data preparation were players that changed clubs during the season. To avoid duplicate records, either the sum or the mean of their performance measures in their two clubs were considered (based on if it is a total or a ratio variable). 
+
+Further data transformation steps included scaling market value of players to million EUR instead of simply EUR for easier interpretation. Also, from the number of matches and minutes played, the combined variable of (average) minutes per game was created. For a more detailed description of all variables please see the Data section of the Appendix. Finally, a filtering of the data was also applied to improve data quality: Those players who did not make at least 2 appearances and a total of 90 minutes over the entire past season were dropped, as we consider their valuation (and football stats) unreliable.
+
+```{r dataprep, message = FALSE, warning = FALSE, echo = FALSE, eval = FALSE}
+#get valuations of players from transfermarkt
+big_5_valuations <- get_player_market_values(country_name = c("England", "Spain", "France", "Italy", "Germany"),start_year = 2021)
+
+#drop unnecessary columns 
+big_5_valuations <- big_5_valuations[, -which(names(big_5_valuations) %in% c("region", "country", "player_dob","joined_from","date_joined", "season_start_year", "player_num", "current_club", "contract_expiry", "player_height_mtrs"))]
+
+#rename column name of transfermarkt url for later merge with fbref data
+colnames(big_5_valuations)[ncol(big_5_valuations)] <- "UrlTmarkt"
+
+#get dataframe of matched urls
+mapped_players <- player_dictionary_mapping()
+
+#drop players for which we have duplicate of urls
+mapped_players <- mapped_players[!duplicated(mapped_players$UrlTmarkt), ]
+
+#inner join with fbref link - we concentrate on players who we have info about - both fbref and transfermarkt
+df <- big_5_valuations %>% inner_join(mapped_players[, -which(names(mapped_players) %in% c("PlayerFBref", "TmPos"))],by="UrlTmarkt")
+
+#using fbref,  get statistics of players in 2020-2021 season
+standard <- fb_big5_advanced_season_stats(season_end_year= 2021, stat_type= "standard", team_or_player= "player")
+
+#select variables of interest
+standard <- standard[, which(names(standard) %in% c("MP_Playing","Min_Playing", "Gls_Per", "Ast_Per", "xG_Per", "xA_Per", "Url"))]
+
+#rename column name of transfermarkt url for merge
+colnames(standard)[ncol(standard)] <- "UrlFBref"
+
+#some players switched clubs during the winter - group by url, calculate the measures accordingly
+standard <- standard %>% group_by(UrlFBref) %>% summarise("matches" = sum(MP_Playing),"minutes" = sum(Min_Playing), "goals_per90" = mean(Gls_Per), "assists_per90" = mean(Ast_Per),  "xg_per90" = mean(xG_Per), "xa_per90" = mean(xA_Per))
+
+#inner join fbref stats 
+df <- df %>% inner_join(standard,by="UrlFBref")
+
+#use fbref to get statistics of shots then same steps as in standard
+shots <- fb_big5_advanced_season_stats(season_end_year= 2021, stat_type= "shooting", team_or_player= "player")
+
+shots <- shots[, which(names(shots) %in% c("Sh_per_90_Standard", "SoT_per_90_Standard", "Url"))]
+
+colnames(shots)[ncol(shots)] <- "UrlFBref"
+
+shots <- shots %>% group_by(UrlFBref) %>% summarise("shots_per90" = mean(Sh_per_90_Standard),"shots_on_target_per90" = mean(SoT_per_90_Standard))
+
+df <- df %>% inner_join(shots,by="UrlFBref")
+
+#use fbref to get statistics of passes then same steps as in standard
+passes <- fb_big5_advanced_season_stats(season_end_year= 2021, stat_type= "passing", team_or_player= "player")
+
+passes <- passes[, which(names(passes) %in% c("Cmp_Total", "Cmp_percent_Total", "Prog", "Url"))]
+
+colnames(passes)[ncol(passes)] <- "UrlFBref"
+
+passes <- passes %>% group_by(UrlFBref) %>% summarise("completed_passes_total" = sum(Cmp_Total),"completed_passes_percent" = mean(Cmp_percent_Total), "progressive_passes" = sum(Prog))
+
+df <- df %>% left_join(passes,by="UrlFBref")
+
+#use fbref to get statistics of defensive actions then same steps as in standard
+defense <- fb_big5_advanced_season_stats(season_end_year= 2021, stat_type= "defense", team_or_player= "player")
+
+defense <- defense[, which(names(defense) %in% c("Tkl_Tackles", "Blocks_Blocks", "Int", "Press_Pressures", "Url"))]
+
+colnames(defense)[ncol(defense)] <- "UrlFBref"
+
+defense <- defense %>% group_by(UrlFBref) %>% summarise("tackles" = mean(Tkl_Tackles),"blocks" = mean(Blocks_Blocks), "interceptions" = mean(Int), "pressures" = mean(Press_Pressures))
+
+df <- df %>% inner_join(defense,by="UrlFBref")
+
+#use fbref to get statistics of goalkeeper stats then same steps as in standard
+keeper <- fb_big5_advanced_season_stats(season_end_year= 2021, stat_type= "keepers", team_or_player= "player")
+
+keeper <- keeper[, which(names(keeper) %in% c("GA90", "Save_percent", "CS_percent", "Url"))]
+
+colnames(keeper)[ncol(keeper)] <- "UrlFBref"
+
+keeper <- keeper %>% group_by(UrlFBref) %>% summarise("goals_against_per90" = mean(GA90),"save_percent" = mean(Save_percent), "clean_sheet_percent" = mean(CS_percent))
+
+#ATTENTION - here I use left_join because the outfield players do not have these statistics
+df <- df %>% left_join(keeper,by="UrlFBref")
+
+summary(df) #check out the variables 
+
+#proof that there are no goalkeepers with NA values only outfield players - can put 0 in place of NAs
+nrow(df %>% filter( is.na(goals_against_per90) & is.na(save_percent) &  is.na(clean_sheet_percent) & player_position == "Goalkeeper"))
+
+#replace values for outfield players with 0 for goalkeeper stats
+df$goals_against_per90[is.na(df$goals_against_per90)] <- 0
+
+df$save_percent[is.na(df$save_percent)] <- 0
+
+df$clean_sheet_percent[is.na(df$clean_sheet_percent)] <- 0
+
+#there is one player with an NA value for completed_passes_percent - replace with 0 - had 0 passes in total
+df$completed_passes_percent[is.na(df$completed_passes_percent)] <- 0
+
+#drop further variables not needed - i.e. URLs
+drop <- c("UrlTmarkt","UrlFBref")
+df <- df[,!(names(df) %in% drop)]
+
+#convert player market value to millions
+df$player_market_value_euro <- as.numeric(gsub("([0-9]+).*$", "\\1", df$player_market_value_euro))/1000000
+
+## SAVE THE DATA AT THIS POINT
+write.csv(df,"data/df.csv", row.names = FALSE)
+```
+
+
+```{r read nad filter, message = FALSE, warning = FALSE, echo = FALSE, eval = TRUE}
+#skipping data preparation step and reading in csv
+df <- read_csv("https://raw.githubusercontent.com/kovaad/Coding_DA2_term_project/main/data/df.csv")
+
+#filter on at least 2 games and total of 90 minutes played
+final_df <- df %>% filter(matches >= 2 & minutes >= 90)
+
+#create variable minutes_per_game
+final_df <- final_df %>% mutate( minutes_per_game = minutes/matches)
+
+```
+## Descriptive statistics
+
+```{r descriptives, message = FALSE, warning = FALSE, echo = FALSE, eval = TRUE}
+# summary stats
+P95 <- function(x){quantile(x,0.95,na.rm=T)}
+P05 <- function(x){quantile(x,0.05,na.rm=T)}
+datasummary( (`Age` = player_age ) + 
+             (`Market value (mn EUR)` = player_market_value_euro ) + 
+             (`Minutes per game` = minutes_per_game) ~
+             Mean + Median + SD + Min + Max + P05 + P95 , 
+             data = final_df, 
+             caption = 'Descriptive statistics', 
+             output = 'kableExtra') %>% 
+      kable_styling(latex_options = c("HOLD_position"), font_size = 9)
+       
+```
+
+Table 1 contains descriptive statistics on the age (x) and market value (y) variables as well as the minutes per game for the players. The number of observations in the dataset is `r sum(!is.na(final_df$player_name))`. Average minutes per game is presented here as a potentially very important covariate. Players are valued based on their performance on the pitch and for that they have to play. Its value in the data ranges from around 10 to the maximum of 90. The mean and median numbers are both around 65-70 minutes. This means that the variable has a close to normal distribution.
+
+The age of players ranges from 17 to 40 and has its median and mean value very close to each other at around 27 years. The distribution is thus close to a normal distribution. As for market value, it ranges from 200 thousand to 160 million euros. Its mean at around 13.5 million euros is much higher than the median at 7 million. This shows that the distribution is left skewed (has a long right tail). It is also notable that the 160 million valuation is an extreme value given that the 95th percentile is almost half this value (90 million). 
+
+The distribution of age and market value are also visualized on Figure 1. We can see the same patterns that we could read out from the descriptive statistics. Based on the distribution of market value (skewed distribution with long right tail) log transform of the y variable is taken as the main explained variable. Looking at the distribution of the log transform in the middle, it is close to a normal distribution. Besides the statistical reasoning, the fact that it is likely affected by age in multiplicative, not additive ways also points toward this transformation. 
+
+```{r association figs, echo=FALSE, warning=FALSE, message = FALSE, fig.width=8, fig.height = 2.5, fig.align="center", fig.cap="Distribution of main variables"}
+
+final_df <- final_df %>% mutate(log_player_market_value_euro = log(player_market_value_euro))
+
+source("theme_adam.R")
+
+# market value
+p1 <- ggplot( final_df , aes(x = player_market_value_euro)) +
+  geom_histogram( binwidth = 15, fill='navyblue', color = 'red' ) +
+  labs(y = 'Number of players',x = "Market value (mn EUR)") +
+  scale_x_continuous(breaks = seq(0,max(final_df$player_market_value_euro),25)) +
+  scale_y_continuous(breaks = seq(0, 1000,250)) +
+  ylim(c(0,1000)) +
+  theme_adam()
+
+# log market value
+p2 <- ggplot( final_df , aes(x = log_player_market_value_euro)) +
+  geom_histogram( binwidth = 0.5, fill='navyblue', color = 'red' ) +
+  labs(y = '',x = "Log (Market value)") +
+  scale_x_continuous(breaks = seq(round(min(final_df$log_player_market_value_euro)),round(max(final_df$log_player_market_value_euro)),1)) +
+  scale_y_continuous(breaks = seq(0, 300, 100)) +
+  ylim(c(0,300)) +
+  theme_adam()
+
+# age
+p3 <- ggplot( final_df , aes(x = player_age)) +
+  geom_histogram(binwidth = 3,fill='navyblue', color = 'red' ) +
+  labs(y = '',x = "Age") +
+  scale_x_continuous(breaks = seq(min(final_df$player_age), max(final_df$player_age),3)) +
+  scale_y_continuous(breaks = seq(0, 400, 100)) +
+  ylim(c(0,500)) +
+  theme_adam()
+
+association_figs <- ggarrange(p1, p2, p3,
+                       hjust = -0.6,
+                       ncol = 3, nrow = 1)
+association_figs
+
+```
+## Modelling
+
+To grasp the relationship between x and y variables, a non-parametric regression (lowess) is visualized on Figure 2.  
+
+```{r, echo=FALSE, warning=FALSE,  message = FALSE, fig.width=4, fig.height = 3, fig.align="center", fig.cap="Lowess on age and log market value"}
+
+# create function for scatters with y variable
+chck_sp <- function( x_var , x_lab, x_axis_label_size, y_axis_label_size, axis_text_size ){
+  ggplot( final_df , aes(x = x_var, y = log_player_market_value_euro)) +
+    geom_point(color='navyblue',size=2,alpha=0.6) +
+    geom_smooth(method="loess" , formula = y ~ x , color = "red")+
+    labs(x = x_lab, y =  "Log (Market value)") +
+    theme_adam() +
+    theme(axis.title.x = element_text(size=x_axis_label_size),
+          axis.title.y =  element_text(size=y_axis_label_size), 
+          axis.text = element_text(size=axis_text_size))
+}
+
+# Our main interest: player age
+chck_sp(final_df$player_age,'Age', 10, 10, 10) +
+  scale_y_continuous(breaks = seq(round(min(final_df$log_player_market_value_euro)),round(max(final_df$log_player_market_value_euro)),1)) +
+  scale_x_continuous(breaks = c(17,20,23,26,27,29, 32, 35, 38), labels = c("17","20","23","26","27","29", "32", "35", "38")) +
+  geom_vline(aes(xintercept=27),
+             color="red", linetype="dashed", size=1) +
+  theme(axis.text.x = element_text(color = c("navyblue", "navyblue", "navyblue", "navyblue", "red", "navyblue", "navyblue", "navyblue"))) +
+  annotate("text", label = "Potential cutoff for spline", 32,5, size = 3, color = "red") 
+
+```
+
+What we can infer from this chart is that until the age of around 27, there is a slight positive relationship between age and market value. From then on, there is a negative relationship between the two variables. Based on this chart, in a linear spline model, a knot at 27 years of age looks reasonable. 
+
+Regarding control variables, all player information including nationality, team (instead of league that would capture the same, yet less information), position and preferred foot are used as factor variables (see frequencies on Figure 4 in the Appendix). As for football performance statistics, descriptives and scatters with the outcome variable are on Figrure 3 of the Appendix. A correlation matrix is also analyzed to identify useful covariates. Based on the matrix, all variables are significantly correlated with market value, and the majority is practically uncorrelated with age. Some of them however have high multicollinearity. As a result, *shots on target per 90 minutes* and *shots per 90 minutes* are dropped since the complex *expected goals per 90* variable already captures the variance of these. Goalkeeper statistics are correlated and with themselves and age, but are kept to capture the relationship for them as well (rest of the statistic completely uninformative for keepers). As for defensive stats, they are also kept because though correlated with each other, they contain different information and are uncorrelated with age.
+
+```{r feature engineering, echo = FALSE, include=FALSE, eval=TRUE}
+
+#create factor variable for competition - choose Premier Leage as the base
+final_df <- within(final_df, comp_name <- relevel(as.factor(comp_name), ref = "Premier League"))
+
+#arbitrary reference - but should be one with high number of players in our sample
+#View(final_df %>% group_by(squad) %>% summarise("players" = n()) %>% arrange(desc(players)) %>% top_n(1))
+
+#either Man United or PSG would be good - 27 players - I choose Man United
+final_df <- within(final_df, squad <- relevel(as.factor(squad), ref = "Manchester United"))
+
+#create factor variable for position - choose center forward as the base
+final_df <- within(final_df, player_position <- relevel(as.factor(player_position), ref = "Centre-Forward"))
+
+#arbitrary reference - but should be one with high number of players in our sample
+#View(final_df %>% group_by(player_nationality) %>% summarise("players" = n()) %>% arrange(desc(player_nationality)) %>% top_n(1))
+
+#I have the most Spanish players, they will be the reference group
+final_df <- within(final_df, player_nationality <- relevel(as.factor(player_nationality), ref = "Spain"))
+
+#create factor variable for preferred foot - choose right as the base
+final_df <- within(final_df, player_foot <- relevel(as.factor(player_foot), ref = "right"))
+
+```
+
+
+```{r models, echo = FALSE, include=FALSE, eval=TRUE}
+
+# reg1: NO control, simple linear regression
+reg1 <- feols( log_player_market_value_euro ~ player_age, data = final_df , vcov = 'hetero' )
+
+# reg2: NO controls, use piecewise linear spline(P.L.S) with a knot at 27
+reg2 <- feols( log_player_market_value_euro ~ lspline( player_age , 27 ) , data = final_df , vcov = 'hetero' )
+
+# reg3: control for minutes per games played
+reg3 <- feols( log_player_market_value_euro ~ lspline( player_age , 27 ) + minutes_per_game, data = final_df , vcov = 'hetero' )
+
+# reg4: reg3 + add further player information: competition, nationality, team, position, preferred foot 
+reg4 <- feols( log_player_market_value_euro ~ lspline( player_age , 27 ) + minutes_per_game
+                   + squad + player_position + player_nationality + player_foot , data = final_df , vcov = 'hetero' )
+
+#reg5: reg4 + performance statistics from fbref
+reg5 <- feols( log_player_market_value_euro ~ lspline( player_age , 27 ) + minutes_per_game 
+                   + squad + player_position + player_nationality + player_foot + goals_per90 + assists_per90 + xg_per90 + xa_per90  + completed_passes_total + completed_passes_percent + progressive_passes + tackles + blocks + interceptions + pressures + goals_against_per90 + save_percent + clean_sheet_percent, data = final_df , vcov = 'hetero' )
+
+# Naming the coefficients for pretty output
+alpha  <- round( reg5$coeftable[1,1] , 2 )
+b1 <- round( reg5$coeftable[2,1] , 2 )
+b2 <- round( reg5$coeftable[3,1] , 2 )
+```
+
+We estimate a total of 5 models to learn about the general pattern of association between the age of players and their market value. The first is a simple linear regression with age as the only explanatory variable. We can interpret it as being one year older is associated with a 9.9% lower market value on average in our data. 
+
+In the second model, we introduce a linear spline with the cutoff at 27 years as discussed in the descriptive statistics part. This model confirms the pattern on the scatter: below 27 years of age, being one year older is associated with a 3.3% higher expected market value. After turning 27, however, an additional year goes together with on average 22% lower market value for the players in our dataset.
+
+In the third model, we include the average minutes per game as a covariate. It is statistically significant even at 1% level and shows that more game time is associated with higher market value. Its  effect on the age variables is also notable: it takes away the significance of age below 27 years.
+
+In the fourth model, we also include the factor variables on basic player information. This has a huge effect on the goodness of fit of the model, $R^2$  rises up to 74% (from 26%). Finally, we also include all the performance metrics from the preceding season in model 5.
+
+```{r, echo = FALSE, eval=TRUE}
+
+# Summarize findings:
+varname_report <- c("(Intercept)" = "Intercept",
+                   "player_age" = "Age",
+                   "lspline(player_age,27)1" = "Age (<27)",
+                   "lspline(player_age,27)2" = "Age (>=27)",
+                   "minutes_per_game" = "Minutes per game")
+groupConf <- list("Player info" = c( "comp_name", "squad", "player_position",  "player_nationality", "player_foot"),
+                  "Attacker stats" = c( "goals_per90", "assists_per90", "xg_per90", "xa_per90"),
+              "Midfielder stats" = c("completed_passes_total", "completed_passes_percent", "progressive_passes" ),
+              "Defender stats" = c("tackles", "blocks", "interceptions", "pressures"),
+              "Goalkeeper stats" = c("goals_against_per90", "save_percent", "clean_sheet_percent"))
+vars_omit <- c("comp_name|squad|player_position|player_nationality|player_foot|goals_per90|assists_per90|xg_per90|xa_per90|completed_passes_total|completed_passes_percent|progressive_passes|tackles|blocks|interceptions|pressures|goals_against_per90|save_percent|clean_sheet_percent")
+
+style_noHeaders = style.tex(var.title = "", fixef.title = "", stats.title = " ")
+
+kable( etable( reg1 , reg2 , reg3 , reg4 , reg5 ,
+        title = 'Log(Market value)',
+        dict = varname_report,
+        drop = vars_omit ,
+        group = groupConf ,
+        se.below = T,
+        coefstat = 'se',
+        fitstat = c('n','r2'),
+        se.row = F,
+        depvar = F ) , 
+        col.names = c('(1)','(2)','(3)','(4)','(5)'),
+       "latex", booktabs = TRUE,  position = "Dependent variable: Log (Market value)",
+       caption = 'Models to uncover relation between age of players and their market value') %>% kable_styling(latex_options = c("hold_position","scale_down"))   %>%
+   add_footnote("Heteroskedasticity-robust standard errors in parantheses", notation="symbol") %>%
+   add_footnote("Signif. codes: '***': 0.001 '**': 0.01 '*': 0.05", notation="symbol")
+   
+```
+
+
+The preferred model is the fifth one. The explanatory power of this model is the best with $R^2$ above 80%. Furthermore, our main explanatory variable (age) is statistically significant at even 1% level for both tiles of the spline. The model in a mathematical format:
+
+$Log(Market\; value)$ = $`r alpha`$ $`r b1`$ $( Age < 27)$ $`r b2`$ $( Age \geq 27) + \delta Z$
+
+where $Z$ stands for the control variables, which includes minutes per games played, competition, team, position, nationality, preferred foot and a selection of football statistics relevant for attackers, midfielders, defenders and goalkeepers. 
+
+The interpretations of the estimated parameters are the following: When every covariate is zero, the log market value of footballers is expected to be $`r alpha`$. Keeping all other covariates in the model constant, each time a footballer gets one year older below the age of 27, they are expected to lose $`r abs(b1*100)`$% of their market value. As for footballers that turned 27 already, keeping all other covariates in the model constant, when they get one year older, players are expected to lose $`r abs(b2*100)`$% of their market value. 
+
+## Robustness check, generalization and external validity
+
+To ensure that our results are robust, we use heteroskedastic robust standard errors. With their help, we check if the main parameters are statistically significantly different from zero. We run two two-sided hypothesis tests for the variables of the linear spline of age:
+
+$$H_0:=\beta_1 = 0 \;and\; H_0:=\beta_2 = 0$$ 
+$$H_A:=\beta_1 \neq 0 \;and\; H_A:=\beta_2 \neq 0$$
+For age below 27 years old, the t-statistic is `r round( reg5$coeftable[2,3] , 2 )`, for  above 27 years old, it is `r round( reg5$coeftable[3,3] , 2 )` which are both higher than 1.96 in absolute value. Below 27 years, the p-value of the test is `r round( reg5$coeftable[2,4] , 2 )` and above it is also `r round( reg5$coeftable[3,4] , 2 )`. The 95% confidence interval of $\beta_1$ is [`r round( reg5$coeftable[2,1]  - 1.96 * reg5$coeftable[2,2] , 2 )`, `r round( reg5$coeftable[2,1]  + 1.96 * reg5$coeftable[2,2] , 2 )`], while that of $\beta_2$ is [`r round( reg5$coeftable[3,1]  - 1.96 * reg5$coeftable[3,2] , 2 )`,`r round( reg5$coeftable[3,1]  + 1.96 * reg5$coeftable[3,2] , 2 )`], both of which do not contain zero. This means that we can refuse the null-hypothesis in both cases, they are statistically significantly different from 0. Furthermore, we can also claim with 95% confidence that holding all other covariates in the model constant, below 27 years of age being one year older is associated with `r abs(round( reg5$coeftable[2,1]  - 1.96 * reg5$coeftable[2,2] , 2 )*100)`% to `r abs(round( reg5$coeftable[2,1]  + 1.96 * reg5$coeftable[2,2] , 2 )*100)`% lower market value in the general pattern represented by our data. And we can also claim with 95% confidence that holding all other covariates in the model constant, above 27 years of age being one year older is associated with `r abs(round( reg5$coeftable[3,1]  - 1.96 * reg5$coeftable[3,2] , 2 )*100)`% to `r abs(round( reg5$coeftable[3,1]  + 1.96 * reg5$coeftable[3,2] , 2 )*100)`% lower market value in the general pattern represented by our data. 
+
+In order to discuss external validity, it is important to return to the nature of the data. The dataset analyzed has good internal validity as it has very good coverage of the players in the top 5 leagues (for the exact numbers see Figure 4 of the Appendix). But this is no guarantee for external validity. To assess that, two approaches could be taken: The first would be to test the model for players of other leagues. If the model performs well on e.g. the Dutch championship as well, then it has high external validity. The second approach would be running the model on other years. If it performs well for 2019 as well, that would also indicate high external validity. Unfortunately, these would require a lot of time-consuming data preparation and are out of scope for this research. Personally, I would expect the model to have high external validity for other championships.
+
+## Summary and conclusion
+
+In this project, the relationship between age and market value of players was analyzed with regression analysis using a dataset of players in the top 5 European leagues. Findings suggest that before turning 27, players in general tend to be valued slightly higher by the market as they get older. However, applying multivariate regression we have shown that among two very similar players (control for position, goals, nationality etc.), the players that is one year older is valued on average at 2% less. After the age of 27, this effect is even more drastic, the player that is one year older is valued on average at 20% less. 
+
+Though the model giving these parameters explains 80% of the variation in the market value and thus brings us close to causality, stating that there is a causal link from x to y would be irresponsible. Not only because it is observational data, but there are further confounders not controlled for, two of the most notable being former clubs and performance (beyond one season). Also, by making the initial restriction of at least 2 matches and 90 minutes, young players yet to prove themselves but having great potential were disproportionately excluded. 
+
+Revisiting the research question, there are two main takeaways from this analysis. First, the market values potential and while gaining experience is important, if there are two players with the same profile, the market will value higher the one with more seasons left to play in his career. Second, footballers tend to reach their peak at around 27 years of age and the downslide in market value from then on is drastic. Thus, the likes of Ibrahimovic or C. Ronaldo seem to be the exception rather than the rule. 
+
+\newpage
+
+## Appendix
+
+### Data
+
+To get the data from the two sources presented in the main text, Jason Zivkovic's R package called [**worldfootballR**](https://github.com/JaseZiv/worldfootballR) is used. The worldfootballR package has a function to download the valuations of players from transfermarkt (get_player_market_values) as well as a huge collection of these urls matched to the corresponding urls of players on fbref (player_dictionary_mapping). Finally, a function of the package that is written to query data from fbref on football stats (fb_big5_advanced_season_stats) was also used. Further information on how the worldfootballR package works other than the github page is available [**here**](https://jaseziv.github.io/worldfootballR/articles/extract-transfermarkt-data.html#join-fbref-and-transfermarkt-data-1) and [**here**](https://jaseziv.github.io/worldfootballR/articles/extract-fbref-data.html#join-fbref-and-transfermarkt-data-1).
+
+During the data preparation phase, from the variables available for players from both transfermarkt and fbref, only a selection of variables were kept that are potential confounders. From transfermarkt, the following variables were used:
+
+* **player_market_value_euro**: market value of player
+* **player_age**: age of player
+* comp_name: competition in which player plays
+* squad: team in which player plays
+* player_name: name of player
+* player_position: primary position player plays
+* player_nationality: nationality of player
+* player_foot: preferred foot of player
+
+From the fbref data, the following variables were selected:
+
+* matches: matches played in the season
+* minutes: minutes played in the season
+* **minutes_per_game**: average minutes played per matches played during the season
+* Attacking stats (most relevant for midfielders and attackers)
+  + goals_per90: goals scored per 90 minutes
+  + assists_per90: assists provided per 90 minutes
+  + xg_per90: expected goals generated per 90 minutes
+  + xa_per90: expected assists generated per 90 minutes
+  + shots_per90: shots taken per 90 minutes
+  + shots_on_target_per90: shots taken that were on target per 90 minutes
+* Midfielder stats
+  + completed_passes_total: total completed passes over the season
+  + completed_passes_percent: ratio of passes completed from all attempted
+  + progressive_passes: number of passes that move the ball towards the opponents goal at least 10 yards
+* Defensive stats
+  + tackles: number of tackles over the season
+  + blocks: number of blocks over the season
+  + interceptions: number of interceptions over the season
+  + pressures: number of times pressure placed on opponent over the season
+* Goalkeeper stats
+  + goals_against_per90: goals conceded per 90 minutes
+  + save_percent: ratio of saves made to total number of shots faced
+  + clean_sheet_percent: ratio  of games where goalkeeper did not concede
+
+### Descriptive statistics
+
+```{r plots covariates, message = FALSE, warning = FALSE, echo = FALSE, eval = TRUE}
+# Summary stats
+datasummary( (`Goals per 90` = goals_per90 ) + 
+             (`Assists per 90` = assists_per90 ) + 
+             (`Expected goals per 90` = xg_per90) + 
+             (`Expected assists per 90` = xa_per90) +
+             (`Shots per 90` = shots_per90) + 
+             (`Shots on target per 90` = shots_on_target_per90) +
+             (`Completed passes` = completed_passes_total) + 
+             (`% of passes completed` = completed_passes_percent) +
+             (`Progressive passes` = progressive_passes) +
+             (`Tackles` = tackles) + 
+             (`Blocks` = blocks) +
+             (`Interceptions` = interceptions) +
+             (`Pressures` = pressures) + 
+             (`Goals conceded per 90` = goals_against_per90) +
+             (`% of shots saved` = save_percent) +
+             (`% of matches clean sheet` = clean_sheet_percent) ~
+             Mean + Median + SD + Min + Max + P05 + P95 , 
+             data = final_df ,
+             title = 'Descriptive statistics of covariates') %>% 
+      kable_styling(latex_options = c("HOLD_position"), font_size = 9)
+```
+
+```{r descriptives covariates, message = FALSE, warning = FALSE, echo = FALSE, eval = TRUE, fig.align="center", fig.cap="Scatter of covariates and log market value"}
+# checking scatter for all covariates with the y variable
+
+p1a <- chck_sp(final_df$goals_per90,'Goals per 90', 8, 6, 6)
+
+p2a <- chck_sp(final_df$assists_per90,'Assists per 90', 8, 6, 6)
+
+p3a <- chck_sp(final_df$xg_per90,'Expected goals per 90', 8, 6, 6)
+
+p4a <- chck_sp(final_df$shots_per90,'Shots per 90', 8, 6, 6)
+
+p5a <- chck_sp(final_df$shots_on_target_per90,'Shots on target per 90', 8, 6, 6)
+
+p6a <- chck_sp(final_df$completed_passes_total,'Completed passes', 8, 6, 6)
+
+p7a <- chck_sp(final_df$completed_passes_percent,'% of passes completed', 8, 6, 6)
+
+p8a <- chck_sp(final_df$progressive_passes,'Progressive passes', 8, 6, 6)
+
+p9a <- chck_sp(final_df$tackles,'Tackles', 8, 6, 6)
+
+p10a <- chck_sp(final_df$blocks,'Blocks', 8, 6, 6)
+
+p11a <- chck_sp(final_df$interceptions,'Interceptions', 8, 6, 6)
+
+p12a <- chck_sp(final_df$pressures,'Pressures', 8, 6, 6)
+
+p13a <- chck_sp(final_df$goals_against_per90,'Goals conceded per 90', 8, 6, 6)
+
+p14a <- chck_sp(final_df$save_percent,'% of shots saved', 8, 6, 6)
+
+p15a <- chck_sp(final_df$clean_sheet_percent,'% of matches clean sheet', 8, 6, 6)
+
+p16a <- chck_sp(final_df$minutes_per_game,'Minutes per game', 8, 6, 6)
+
+association_figs_a <- ggarrange(p1a, p2a, p3a, p4a,
+                              p5a, p6a, p7a, p8a,
+                              p9a, p10a, p11a, p12a,
+                              p13a, p14a, p15a, p16a,
+                       hjust = -0.6,
+                       ncol = 4, nrow = 4)
+association_figs_a
+```
+
+
+```{r counts of covariates, message = FALSE, warning = FALSE, echo = FALSE, eval = TRUE, fig.width=8, fig.height = 12, fig.align="center", fig.cap="Frequencies of factor variables as covariates"}
+comps <- final_df %>%
+  group_by(comp_name) %>%
+  summarise(counts = n())
+
+c1a <- ggplot(comps, aes(reorder(comp_name, -counts), counts, fill = "navyblue")) +
+  scale_fill_identity() +
+  geom_col(color = "red") +
+  geom_text(aes(label = counts), vjust = -0.3) + 
+  labs(x = "Competitions",
+       y = "Number of players") +
+    theme_adam() + 
+  theme(legend.position = "none")
+
+position <- final_df %>%
+  group_by(player_position) %>%
+  summarise(counts = n())
+
+c2a <- ggplot(position, aes(reorder(player_position, -counts), counts, fill = "navyblue")) +
+  scale_fill_identity() +
+  geom_col(color = "red") +
+  geom_text(aes(label = counts), vjust = -0.3) + 
+  labs(x = "Positions",
+       y = "Number of players") +
+    theme_adam() + 
+  theme(legend.position = "none",
+        axis.text.x = element_text(size=6))
+
+foot <- final_df %>%
+  group_by(player_foot) %>%
+  summarise(counts = n())
+
+c3a <- ggplot(foot, aes(reorder(player_foot, -counts), counts, fill = "navyblue")) +
+  scale_fill_identity() +
+  geom_col(color = "red") +
+  geom_text(aes(label = counts), vjust = -0.3) + 
+  labs(x = "Preferred foot",
+       y = "Number of players") +
+    theme_adam() + 
+  theme(legend.position = "none")
+
+count_figs_a <- ggarrange(c1a, c2a, c3a, 
+                       hjust = -0.6,
+                       ncol = 1, nrow = 3)
+count_figs_a
+```
+
+
+```{r  correlation matrix, message = FALSE, warning = FALSE, echo = FALSE, eval = TRUE, fig.width=7, fig.height = 7, fig.align="center", fig.cap="Correlation matrix"}
+
+numerical_covariates <- final_df %>% select("minutes_per_game","goals_per90", "assists_per90", "xg_per90", "xa_per90","shots_per90","shots_on_target_per90","completed_passes_total","completed_passes_percent","progressive_passes","tackles","blocks","interceptions","pressures","goals_against_per90","save_percent","clean_sheet_percent", "log_player_market_value_euro", "player_age")
+#corrplot
+corr <- round(cor(numerical_covariates), 1)
+
+p.mat <- cor_pmat(numerical_covariates)
+
+ggcorrplot(corr, hc.order = FALSE,
+           type = "lower",
+           lab = FALSE, 
+           ggtheme = theme_adam, 
+           p.mat = p.mat)
+
+```
