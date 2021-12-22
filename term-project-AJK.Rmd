@@ -36,7 +36,7 @@ library(worldfootballR)
 ```
 ## Data
 
-The dataset analyzed contains footballers in the European big 5 championships and was constructed from two sources. For the two main variables, market value and age as well as basic information on players (e.g. nationality, team, preferred foot), [**transfermarkt.com**](https://www.transfermarkt.com) is the source of data. As for statistics on the performance of players (e.g. goals, assists etc.), [**fbref.com**](https://fbref.com/en/) is the source of data. More information on how the dataset was built is available in the Data section of the Appendix. 
+The dataset analyzed contains footballers in the European big 5 championships and was constructed from two sources. For the two main variables, market value and age as well as basic information on players (e.g. nationality, team, preferred foot), [**transfermarkt.com**](https://www.transfermarkt.com) is the source of data. As for statistics on the performance of players (e.g. goals, assists etc.), [**fbref.com**](https://fbref.com/en/) is the source of data. More information on how the dataset was built is available in the Data section of the Appendix.
 
 In a bit more detail about the variables: market value and player information downloaded from transfermarkt contain data of players before the beginning of the 2021/22 season. As a consequence, football statistics for the preceding season are considered from fbref (they contain up-to-date information potentially driving the valuation of the players). When merging the datasets from the two sources, inner joins were used for most variables (lost observations did not play a single game in the 2020-21 season). The only exceptions were goalkeeper statistics where left join was applied and NA values of outfield players were replaced by zeros (goalkeepers also have 0 for e.g. goals). An issue in data preparation were players that changed clubs during the season. To avoid duplicate records, either the sum or the mean of their performance measures in their two clubs were considered (based on if it is a total or a ratio variable). 
 
@@ -420,6 +420,8 @@ From the fbref data, the following variables were selected:
   + save_percent: ratio of saves made to total number of shots faced
   + clean_sheet_percent: ratio  of games where goalkeeper did not concede
 
+The raw data (and all the codes) are available in the github repository of the project [**here**](https://github.com/kovaad/Coding_DA2_term_project).
+
 ### Descriptive statistics
 
 ```{r plots covariates, message = FALSE, warning = FALSE, echo = FALSE, eval = TRUE}
@@ -554,3 +556,6 @@ ggcorrplot(corr, hc.order = FALSE,
            p.mat = p.mat)
 
 ```
+
+
+
