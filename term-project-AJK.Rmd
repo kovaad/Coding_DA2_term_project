@@ -300,9 +300,9 @@ reg5 <- feols( log_player_market_value_euro ~ lspline( player_age , 27 ) + minut
                    + squad + player_position + player_nationality + player_foot + goals_per90 + assists_per90 + xg_per90 + xa_per90  + completed_passes_total + completed_passes_percent + progressive_passes + tackles + blocks + interceptions + pressures + goals_against_per90 + save_percent + clean_sheet_percent, data = final_df , vcov = 'hetero' )
 
 # Naming the coefficients for pretty output
-alpha  <- round( reg5$coeftable[1,1] , 2 )
-b1 <- round( reg5$coeftable[2,1] , 2 )
-b2 <- round( reg5$coeftable[3,1] , 2 )
+alpha  <- round( reg5$coeftable[1,1] , 3 )
+b1 <- round( reg5$coeftable[2,1] , 3 )
+b2 <- round( reg5$coeftable[3,1] , 3 )
 ```
 
 We estimate a total of 5 models to learn about the general pattern of association between the age of players and their market value. The first is a simple linear regression with age as the only explanatory variable. We can interpret it as being one year older is associated with a 9.9% lower market value on average in our data. 
@@ -355,7 +355,7 @@ $Log(Market\; value)$ = $`r alpha`$ $`r b1`$ $( Age < 27)$ $`r b2`$ $( Age \geq 
 
 where $Z$ stands for the control variables, which includes minutes per games played, competition, team, position, nationality, preferred foot and a selection of football statistics relevant for attackers, midfielders, defenders and goalkeepers. 
 
-The interpretations of the estimated parameters are the following: When every covariate is zero, the log market value of footballers is expected to be $`r alpha`$. Keeping all other covariates in the model constant, each time a footballer gets one year older below the age of 27, they are expected to lose $`r abs(b1*100)`$% of their market value. As for footballers that turned 27 already, keeping all other covariates in the model constant, when they get one year older, players are expected to lose $`r abs(b2*100)`$% of their market value. 
+The interpretations of the estimated parameters are the following: When every covariate is zero, the log market value of footballers is expected to be $`r alpha`$. Keeping all other covariates in the model constant, each time a footballer gets one year older below the age of 27, they are expected to lose around $`r abs(b1*100)`$% of their market value. As for footballers that turned 27 already, keeping all other covariates in the model constant, when they get one year older, players are expected to lose around $`r abs(b2*100)`$% of their market value. 
 
 ## Robustness check, generalization and external validity
 
